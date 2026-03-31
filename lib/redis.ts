@@ -13,7 +13,25 @@ export type AppState = {
   curatedList: Song[]
 }
 
-const redis = Redis.fromEnv()
+function getRedis(): Redis {
+  const url = process.env.UPSTASH_REDIS_REST_URL
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN
+  
+  if (!url || !token) {
+    throw new Error('Missing UPSTASH_REDIS_REST_URL or UPSTASH_REDIS_REST_TOKEN environment variables')
+  }
+  
+  return new Redis({ url, token })
+}
+
+let redisInstance: Redis | null = null
+
+function getRedisInstance(): Redis {
+  if (!redisInstance) {
+    redisInstance = getRedis()
+  }
+  return redisInstance
+}
 
 const KEYS = {
   nowPlaying: 'singsync:nowPlaying',
@@ -60,10 +78,11 @@ function parseSongArray(data: unknown): Song[] {
 }
 
 export async function getState(): Promise<AppState> {
+  const r = getRedisInstance()
   const [nowPlayingData, queueData, historyData] = await Promise.all([
-    redis.get<string>(KEYS.nowPlaying),
-    redis.lrange<string>(KEYS.queue, 0, -1),
-    redis.lrange<string>(KEYS.history, 0, -1),
+    r.get<string>(KEYS.nowPlaying),
+    r.lrange<string>(KEYS.queue, 0, -1),
+    r.lrange<string>(KEYS.history, 0, -1),
   ])
 
   return {
@@ -75,22 +94,24 @@ export async function getState(): Promise<AppState> {
 }
 
 export async function addToQueue(song: Song): Promise<void> {
-  await redis.lpush(KEYS.queue, JSON.stringify(song))
+  await getRedisInstance().lpush(KEYS.queue, JSON.stringify(song))
 }
 
 export async function removeFromQueue(index: number): Promise<void> {
-  const queueData = await redis.lrange<string>(KEYS.queue, 0, -1)
+  const r = getRedisInstance()
+  const queueData = await r.lrange<string>(KEYS.queue, 0, -1)
   const queue = parseSongArray(queueData)
   if (queue.length === 0) return
 
   const adjustedIndex = queue.length - 1 - index
   if (adjustedIndex < 0 || adjustedIndex >= queue.length) return
 
-  await redis.lrem(KEYS.queue, 1, JSON.stringify(queue[adjustedIndex]))
+  await r.lrem(KEYS.queue, 1, JSON.stringify(queue[adjustedIndex]))
 }
 
 export async function reorderQueue(fromIndex: number, toIndex: number): Promise<void> {
-  const queueData = await redis.lrange<string>(KEYS.queue, 0, -1)
+  const r = getRedisInstance()
+  const queueData = await r.lrange<string>(KEYS.queue, 0, -1)
   const queue = parseSongArray(queueData)
   if (queue.length === 0) return
 
@@ -105,34 +126,35 @@ export async function reorderQueue(fromIndex: number, toIndex: number): Promise<
   queue.splice(adjustedTo, 0, item)
 
   const updatedQueue = queue.reverse()
-  await redis.del(KEYS.queue)
+  await r.del(KEYS.queue)
   if (updatedQueue.length > 0) {
-    await redis.rpush(KEYS.queue, updatedQueue.map(song => JSON.stringify(song)))
+    await r.rpush(KEYS.queue, updatedQueue.map(song => JSON.stringify(song)))
   }
 }
 
 export async function advanceToNext(): Promise<{ nowPlaying: Song | null; queue: Song[] }> {
-  const queueData = await redis.lrange<string>(KEYS.queue, 0, -1)
+  const r = getRedisInstance()
+  const queueData = await r.lrange<string>(KEYS.queue, 0, -1)
   const queue = parseSongArray(queueData)
-  const nowPlayingData = await redis.get<string>(KEYS.nowPlaying)
+  const nowPlayingData = await r.get<string>(KEYS.nowPlaying)
   const nowPlaying = parseSong(nowPlayingData)
 
   if (queue.length === 0) {
-    await redis.del(KEYS.nowPlaying)
+    await r.del(KEYS.nowPlaying)
     return { nowPlaying: null, queue: [] }
   }
 
   const [nextSong, ...remainingQueue] = queue
 
   await Promise.all([
-    redis.lpop<string>(KEYS.queue),
-    redis.set(KEYS.nowPlaying, JSON.stringify(nextSong)),
-    nowPlaying ? redis.lpush(KEYS.history, JSON.stringify(nowPlaying)) : Promise.resolve(),
+    r.lpop<string>(KEYS.queue),
+    r.set(KEYS.nowPlaying, JSON.stringify(nextSong)),
+    nowPlaying ? r.lpush(KEYS.history, JSON.stringify(nowPlaying)) : Promise.resolve(),
   ])
 
   return { nowPlaying: nextSong, queue: remainingQueue }
 }
 
 export async function clearQueue(): Promise<void> {
-  await redis.del(KEYS.queue)
+  await getRedisInstance().del(KEYS.queue)
 }
